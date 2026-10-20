@@ -14,6 +14,8 @@ import {
   HeartPulse,
   House,
   LogOut,
+  MapPin,
+  MessageCircle,
   Pause,
   Play,
   RotateCcw,
@@ -25,11 +27,16 @@ import {
   UserRound,
   Video,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 
 import wellnessImage from "@/assets/unistretch-wellness.jpg";
+import doctorPrincess from "@/assets/doctor-princess.jpg";
+import doctorRyu from "@/assets/doctor-ryu.jpg";
+import doctorOwen from "@/assets/doctor-owen.jpg";
+import { DoctorChat } from "@/components/doctor-chat";
 import { FirstLoginTour, type AppTab } from "@/components/first-login-tour";
+import { SectionJumpBar, type JumpItem } from "@/components/section-jump-bar";
 import { StretchStepGuide } from "@/components/stretch-step-guide";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -84,6 +91,15 @@ const reviewSchema = z.object({
     .max(600, "Feedback must be 600 characters or less"),
 });
 
+const REMINDER_OPTIONS = [5, 10, 15, 20, 30, 45, 60];
+
+const HOSPITAL_NAME = "Uni Hospital";
+const DOCTOR_HOURS = "Mon–Fri · 09:00–16:00";
+const APPOINTMENT_SLOTS = ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00"];
+const BANGKOK_TZ = "Asia/Bangkok";
+// Stored at the start of `doctor_bookings.notes` until the table has its own insurance column.
+const INSURANCE_TAG = "[Student insurance]";
+
 // Only written while the timer is paused, so its presence means "paused with this value".
 const SITTING_TIMER_KEY = "unistretch:sitting-timer:v1";
 
@@ -129,24 +145,53 @@ const stretchVideos = [
 
 const doctors = [
   {
-    name: "Dr. Maya Chen",
+    name: "Dr. Princess Chen",
     specialty: "Physiotherapy",
-    next: "Today, 15:30",
-    iso: "2026-10-06T15:30:00+07:00",
+    availability: DOCTOR_HOURS,
+    photo: doctorPrincess,
   },
   {
-    name: "Dr. Arin Patel",
+    name: "Dr. Ryu Patel",
     specialty: "Ergonomics consult",
-    next: "Tomorrow, 10:00",
-    iso: "2026-10-07T10:00:00+07:00",
+    availability: DOCTOR_HOURS,
+    photo: doctorRyu,
   },
   {
-    name: "Dr. Nicha Wong",
+    name: "Dr. Owen Wong",
     specialty: "Rehab medicine",
-    next: "Fri, 13:00",
-    iso: "2026-10-09T13:00:00+07:00",
+    availability: DOCTOR_HOURS,
+    photo: doctorOwen,
   },
 ];
+
+type BookableDay = { key: string; label: string };
+
+// Date helpers use Thailand time (UTC+7) so slots mean the same thing on any device.
+function getBookableDays(from: number, count = 10): BookableDay[] {
+  const keyFormat = new Intl.DateTimeFormat("en-CA", { timeZone: BANGKOK_TZ, year: "numeric", month: "2-digit", day: "2-digit" });
+  const labelFormat = new Intl.DateTimeFormat("en-GB", { timeZone: BANGKOK_TZ, weekday: "short", day: "numeric", month: "short" });
+  const weekdayFormat = new Intl.DateTimeFormat("en-US", { timeZone: BANGKOK_TZ, weekday: "short" });
+  const days: BookableDay[] = [];
+  for (let offset = 0; days.length < count && offset < 30; offset++) {
+    const date = new Date(from + offset * 24 * 60 * 60 * 1000);
+    const weekday = weekdayFormat.format(date);
+    if (weekday === "Sat" || weekday === "Sun") continue;
+    days.push({ key: keyFormat.format(date), label: labelFormat.format(date).replace(",", "") });
+  }
+  return days;
+}
+
+function formatAppointment(iso: string) {
+  return new Date(iso).toLocaleString("en-GB", {
+    timeZone: BANGKOK_TZ,
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 const rewardPreviews = [
   { id: "drink", title: "Healthy drink voucher", points: 100, icon: Coffee, description: "A refreshing reward for your next stretch milestone." },
@@ -189,18 +234,24 @@ function UniStretchApp() {
   const [secondsSitting, setSecondsSitting] = useState(0);
   const [isRunning, setIsRunning] = useState(true);
   const [timerHydrated, setTimerHydrated] = useState(false);
+  const [timerResetKey, setTimerResetKey] = useState(0);
   const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
   const [snoozedUntil, setSnoozedUntil] = useState<number | null>(null);
   const [selectedDoctor, setSelectedDoctor] = useState<(typeof doctors)[number]>(
     doctors[0] ?? {
-      name: "Dr. Maya Chen",
+      name: "Dr. Princess Chen",
       specialty: "Physiotherapy",
-      next: "Today, 15:30",
-      iso: "2026-10-06T15:30:00+07:00",
+      availability: DOCTOR_HOURS,
+      photo: doctorPrincess,
     },
   );
   const [bookingNotes, setBookingNotes] = useState("");
   const [bookingMessage, setBookingMessage] = useState("");
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [bookableDays, setBookableDays] = useState<BookableDay[]>([]);
+  const [appointmentDay, setAppointmentDay] = useState<string | null>(null);
+  const [appointmentSlot, setAppointmentSlot] = useState<string | null>(null);
+  const [useStudentInsurance, setUseStudentInsurance] = useState(true);
   const [reviewRating, setReviewRating] = useState(0);
   const [reviewFeedback, setReviewFeedback] = useState("");
   const [reviewError, setReviewError] = useState("");
@@ -210,6 +261,12 @@ function UniStretchApp() {
   const [activeTab, setActiveTab] = useState<AppTab>("home");
   const [exercise, setExercise] = useState<{ videoIndex: number; startedAt: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
+
+  // Reset to 00:00 and restart the wall-clock baseline (a bare setSecondsSitting(0) would be overwritten by the next sync).
+  function resetSittingTimer() {
+    setSecondsSitting(0);
+    setTimerResetKey((key) => key + 1);
+  }
 
   const openTab = useCallback((id: AppTab, targetId: string = id) => {
     setActiveTab(id);
@@ -274,8 +331,8 @@ function UniStretchApp() {
         .from("doctor_bookings")
         .select("*")
         .eq("user_id", user.id)
-        .order("appointment_time", { ascending: true })
-        .limit(3);
+        .order("appointment_time", { ascending: false })
+        .limit(30);
       if (error) throw error;
       return data;
     },
@@ -324,11 +381,24 @@ function UniStretchApp() {
   const streakPoints = profile?.streak_points ?? (user ? 0 : 120);
   const currentStreak = profile?.current_streak_days ?? (user ? 0 : 3);
 
+  // Count from wall-clock time instead of "+1 per tick": browsers throttle or pause
+  // timers in background tabs, so tick counting drifts when the user switches windows.
+  const secondsRef = useRef(secondsSitting);
+  secondsRef.current = secondsSitting;
   useEffect(() => {
     if (!isRunning) return;
-    const timer = window.setInterval(() => setSecondsSitting((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [isRunning]);
+    const startedAt = Date.now();
+    const base = secondsRef.current;
+    const sync = () => setSecondsSitting(base + Math.floor((Date.now() - startedAt) / 1000));
+    const timer = window.setInterval(sync, 1000);
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("focus", sync);
+    };
+  }, [isRunning, timerResetKey]);
 
   useEffect(() => {
     if (!exercise) return;
@@ -403,7 +473,7 @@ function UniStretchApp() {
       return { nextPoints, nextStreak };
     },
     onSuccess: () => {
-      setSecondsSitting(0);
+      resetSittingTimer();
       setSnoozedUntil(null);
       setExercise(null);
       queryClient.invalidateQueries({ queryKey: ["unistretch", "profile", user?.id] });
@@ -424,28 +494,42 @@ function UniStretchApp() {
 
   const bookingMutation = useMutation({
     mutationFn: async () => {
-      if (!user) throw new Error("Please sign in to book a doctor.");
+      if (!user) throw new Error("Please sign in to book an appointment.");
+      if (!selectedSlotIso) throw new Error("Please choose a date and time.");
+      const alreadyBooked = (bookingsQuery.data ?? []).some(
+        (booking) =>
+          booking.status === "booked" &&
+          booking.doctor_name === selectedDoctor.name &&
+          new Date(booking.appointment_time).getTime() === new Date(selectedSlotIso).getTime(),
+      );
+      if (alreadyBooked) throw new Error("You already have an appointment with this doctor at that time.");
       const parsed = bookingSchema.parse({
         doctorName: selectedDoctor.name,
         specialty: selectedDoctor.specialty,
-        appointmentTime: selectedDoctor.iso,
+        appointmentTime: selectedSlotIso,
         notes: bookingNotes,
       });
+      const notes = [useStudentInsurance ? INSURANCE_TAG : "", parsed.notes ?? ""].filter(Boolean).join(" ");
       const { error } = await supabase.from("doctor_bookings").insert({
         user_id: user.id,
         doctor_name: parsed.doctorName,
         specialty: parsed.specialty,
         appointment_time: parsed.appointmentTime,
-        notes: parsed.notes || null,
+        notes: notes || null,
       });
       if (error) throw error;
     },
     onSuccess: () => {
       setBookingNotes("");
-      setBookingMessage("Your online appointment is confirmed.");
+      setAppointmentSlot(null);
+      setBookingMessage("Your appointment is confirmed.");
       queryClient.invalidateQueries({ queryKey: ["unistretch", "bookings", user?.id] });
+      openTab("booking", "my-appointments");
     },
-    onError: (error) => setBookingMessage(error instanceof Error ? error.message : "Booking failed."),
+    onError: (error) => {
+      const message = error instanceof z.ZodError ? error.errors[0]?.message : undefined;
+      setBookingMessage(message ?? (error instanceof Error ? error.message : "Booking failed."));
+    },
   });
 
   const reviewMutation = useMutation({
@@ -471,6 +555,54 @@ function UniStretchApp() {
       setReviewError(message ?? (error instanceof Error ? error.message : "Review failed."));
     },
   });
+
+  useEffect(() => {
+    if (activeTab === "booking") setBookableDays(getBookableDays(Date.now()));
+  }, [activeTab]);
+
+  const activeDay =
+    appointmentDay && bookableDays.some((day) => day.key === appointmentDay) ? appointmentDay : (bookableDays[0]?.key ?? null);
+  const slotOptions = activeDay
+    ? APPOINTMENT_SLOTS.map((time) => {
+        const iso = `${activeDay}T${time}:00+07:00`;
+        const startsAt = new Date(iso).getTime();
+        const isPast = startsAt < Date.now() + 30 * 60 * 1000;
+        const isTaken = (bookingsQuery.data ?? []).some(
+          (booking) =>
+            booking.status === "booked" &&
+            booking.doctor_name === selectedDoctor.name &&
+            new Date(booking.appointment_time).getTime() === startsAt,
+        );
+        return { time, iso, isPast, isTaken };
+      })
+    : [];
+  const selectedSlotIso =
+    slotOptions.find((slot) => slot.time === appointmentSlot && !slot.isPast && !slot.isTaken)?.iso ?? null;
+
+  const jumpItems: Record<AppTab, JumpItem[]> = {
+    home: [
+      ...(user ? [{ id: "user-dashboard", label: "Overview" }] : []),
+      { id: "timer", label: "Timer" },
+      { id: "streak", label: "Streak" },
+      { id: "rewards", label: "Rewards" },
+      { id: "health-event", label: "Event" },
+    ],
+    stretch: [
+      ...(exercise ? [{ id: "exercise", label: "Exercise" }] : []),
+      { id: "stretch-guide", label: "Guide" },
+      { id: "stretch-videos", label: "Videos" },
+    ],
+    booking: [
+      { id: "doctor-list", label: "Doctors" },
+      ...(isChatOpen ? [{ id: "chat", label: "Chat" }] : []),
+      { id: "book-appointment", label: "Book" },
+      { id: "my-appointments", label: "My appointments" },
+    ],
+    profile: [
+      { id: "profile-settings", label: "Settings" },
+      { id: "review", label: "Review" },
+    ],
+  };
 
   const formattedTime = useMemo(() => formatDuration(secondsSitting), [secondsSitting]);
 
@@ -563,7 +695,7 @@ function UniStretchApp() {
   }
 
   return (
-    <main className="min-h-screen overflow-hidden bg-background pb-28 text-foreground">
+    <main className="min-h-screen overflow-x-clip bg-background pb-28 text-foreground">
       <section id="home" className={cn("relative scroll-mt-4 border-b border-border bg-[image:var(--gradient-hero)]", activeTab !== "home" && "hidden")}>
         <div className="absolute inset-x-0 top-0 h-2 bg-[image:var(--gradient-strip)]" />
         <div className={cn("mx-auto grid max-w-7xl gap-8 px-4 pt-5 sm:px-6 lg:px-8 lg:pt-6", user ? "pb-5" : "min-h-[80vh] pb-10 lg:grid-cols-[1.05fr_0.95fr]")}>
@@ -638,8 +770,10 @@ function UniStretchApp() {
         </div>
       </section>
 
+      <SectionJumpBar items={jumpItems[activeTab]} />
+
       {user && (
-        <section id="user-dashboard" className={cn("mx-auto max-w-7xl px-4 pt-6 sm:px-6 lg:px-8", activeTab !== "home" && "hidden")}>
+        <section id="user-dashboard" className={cn("mx-auto max-w-7xl scroll-mt-16 px-4 pt-6 sm:px-6 lg:px-8", activeTab !== "home" && "hidden")}>
           <div className="mb-5 flex items-center gap-3">
             <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"><UserRound className="size-6" /></div>
             <div className="min-w-0">
@@ -678,7 +812,7 @@ function UniStretchApp() {
               <Button variant="soft" size="icon" onClick={() => setIsRunning((value) => !value)} aria-label={isRunning ? "Pause timer" : "Start timer"}>
                 {isRunning ? <Pause className="size-4" /> : <Play className="size-4" />}
               </Button>
-              <Button variant="soft" size="icon" onClick={() => setSecondsSitting(0)} aria-label="Reset timer">
+              <Button variant="soft" size="icon" onClick={resetSittingTimer} aria-label="Reset timer">
                 <RotateCcw className="size-4" />
               </Button>
             </div>
@@ -715,22 +849,27 @@ function UniStretchApp() {
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">Finish the short exercise first — then you get 10 points.</p>
               </div>
-              <div className="grid grid-cols-3 gap-3">
-                {[30, 45, 60].map((minutes) => (
-                  <Button
-                    key={minutes}
-                    variant={reminderMinutes === minutes ? "default" : "soft"}
-                    onClick={() => (user ? updateReminderMutation.mutate(minutes) : setIsAuthDialogOpen(true))}
-                  >
-                    {minutes} min
-                  </Button>
-                ))}
+              <div className="space-y-2">
+                <Label htmlFor="home-reminder-interval">Remind me every</Label>
+                <Select
+                  value={String(reminderMinutes)}
+                  onValueChange={(value) => (user ? updateReminderMutation.mutate(Number(value)) : setIsAuthDialogOpen(true))}
+                >
+                  <SelectTrigger id="home-reminder-interval" className="rounded-2xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {REMINDER_OPTIONS.map((minutes) => (
+                      <SelectItem key={minutes} value={String(minutes)}>{minutes} minutes</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </CardContent>
         </Card>
 
-        <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+        <Card id="streak" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
               <Flame className="size-6 text-event-foreground" /> Streak motivation
@@ -742,7 +881,7 @@ function UniStretchApp() {
               <p className="mt-2 text-5xl font-black">{streakPoints}</p>
               <p className="mt-3 text-sm opacity-90">{currentStreak} day active stretch streak</p>
             </div>
-            <div className="space-y-3 border-b border-border pb-5">
+            <div id="rewards" className="scroll-mt-24 space-y-3 border-b border-border pb-5">
               <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                 <h3 className="flex min-w-0 items-center gap-2 font-bold"><Gift className="size-4 shrink-0 text-primary" /> Rewards</h3>
                 <Badge variant="outline" className="shrink-0">Coming soon</Badge>
@@ -785,7 +924,7 @@ function UniStretchApp() {
         </div>
       </section>
 
-      <section id="health-event" className={cn("mx-auto max-w-7xl px-4 pb-8 sm:px-6 lg:px-8", activeTab !== "home" && "hidden")}>
+      <section id="health-event" className={cn("mx-auto max-w-7xl scroll-mt-16 px-4 pb-8 sm:px-6 lg:px-8", activeTab !== "home" && "hidden")}>
         <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
@@ -862,8 +1001,10 @@ function UniStretchApp() {
             </CardContent>
           </Card>
         ) : null}
-        <StretchStepGuide key={exercise?.videoIndex ?? "browse"} initialIndex={exercise?.videoIndex ?? 0} />
-        <div className="grid gap-4 md:grid-cols-3">
+        <div id="stretch-guide" className="scroll-mt-20">
+          <StretchStepGuide key={exercise?.videoIndex ?? "browse"} initialIndex={exercise?.videoIndex ?? 0} />
+        </div>
+        <div id="stretch-videos" className="grid scroll-mt-20 gap-4 md:grid-cols-3">
           {stretchVideos.map((video, index) => (
             <Card key={video.title} className="overflow-hidden rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
               <div className="aspect-video overflow-hidden bg-muted">
@@ -901,61 +1042,230 @@ function UniStretchApp() {
 
       <section id="booking" className={cn("mx-auto min-h-[calc(100vh-6rem)] max-w-7xl scroll-mt-20 px-4 py-6 sm:px-6 md:py-8 lg:px-8", activeTab !== "booking" && "hidden")}>
         <div className="grid gap-6">
+          <Card id="doctor-list" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <Stethoscope className="size-6 text-primary" /> Our doctors
+              </CardTitle>
+              <p className="mt-1 text-sm text-muted-foreground">Pick a doctor, then book an appointment at {HOSPITAL_NAME} or chat now.</p>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 md:grid-cols-3">
+                {doctors.map((doctor) => {
+                  const selected = selectedDoctor.name === doctor.name;
+                  return (
+                    <div
+                      key={doctor.name}
+                      className={cn(
+                        "flex flex-col gap-3 rounded-3xl border p-4 transition",
+                        selected ? "border-primary bg-primary/10" : "border-border bg-surface-soft",
+                      )}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDoctor(doctor)}
+                        aria-pressed={selected}
+                        className="flex items-center gap-3 rounded-2xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="relative shrink-0">
+                          <img src={doctor.photo} alt={`Portrait of ${doctor.name}`} width={64} height={64} loading="lazy" className="size-16 rounded-full object-cover" />
+                          <span role="img" aria-label="Online" className="absolute bottom-0 right-0 size-4 rounded-full border-2 border-card bg-success" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate font-black">{doctor.name}</span>
+                          <span className="mt-0.5 block text-sm text-muted-foreground">{doctor.specialty}</span>
+                          <span className="mt-1 block text-xs font-bold text-primary">{doctor.availability}</span>
+                        </span>
+                      </button>
+                      <div className="flex flex-col gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="wellness"
+                          onClick={() => {
+                            setSelectedDoctor(doctor);
+                            openTab("booking", "book-appointment");
+                          }}
+                        >
+                          <CalendarCheck className="size-4" /> Book appointment
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="soft"
+                          onClick={() => {
+                            setSelectedDoctor(doctor);
+                            setIsChatOpen(true);
+                            openTab("booking", "chat");
+                          }}
+                        >
+                          <MessageCircle className="size-4" /> Chat now
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
 
-
-        <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-2xl">
-              <Stethoscope className="size-6 text-primary" /> Online doctor booking
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            <div className="grid gap-3 md:grid-cols-3">
-              {doctors.map((doctor) => (
-                <Button
-                  key={doctor.name}
-                  type="button"
-                  variant="soft"
-                  onClick={() => setSelectedDoctor(doctor)}
-                  className={cn(
-                    "h-auto min-h-32 whitespace-normal rounded-3xl border p-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    selectedDoctor.name === doctor.name ? "border-primary bg-primary/10" : "border-border bg-surface-soft hover:bg-muted",
-                  )}
-                >
-                  <span className="block w-full">
-                    <span className="block font-black">{doctor.name}</span>
-                    <span className="mt-1 block text-sm text-muted-foreground">{doctor.specialty}</span>
-                    <span className="mt-3 block text-sm font-bold text-primary">{doctor.next}</span>
-                  </span>
+          {isChatOpen ? (
+            <Card id="chat" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+              <CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
+                <CardTitle className="flex items-center gap-2 text-2xl">
+                  <MessageCircle className="size-6 text-primary" /> Chat consult
+                </CardTitle>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setIsChatOpen(false)}>
+                  Close chat
                 </Button>
-              ))}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="booking-notes">Notes for the doctor</Label>
-              <Textarea
-                id="booking-notes"
-                value={bookingNotes}
-                maxLength={500}
-                onChange={(event) => setBookingNotes(event.target.value)}
-                placeholder="Example: neck pain after long meetings"
-                className="min-h-24 rounded-2xl"
-              />
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <Button variant="hero" onClick={handleBooking} disabled={bookingMutation.isPending}>
-                <CalendarCheck className="size-4" /> Confirm appointment
-              </Button>
-              {bookingMessage ? <p className="text-sm font-semibold text-primary">{bookingMessage}</p> : null}
-            </div>
-            <BookingList bookings={bookingsQuery.data ?? []} />
-          </CardContent>
-        </Card>
+              </CardHeader>
+              <CardContent>
+                <DoctorChat
+                  doctor={selectedDoctor}
+                  userId={user?.id}
+                  onRequireSignIn={() => setIsAuthDialogOpen(true)}
+                  onBook={() => openTab("booking", "book-appointment")}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <Card id="book-appointment" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-2xl">
+                <CalendarCheck className="size-6 text-primary" /> Book an appointment
+              </CardTitle>
+              <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+                <MapPin className="size-4 shrink-0" /> See a doctor in person at {HOSPITAL_NAME}.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="flex items-center gap-3 rounded-2xl bg-muted p-3">
+                <img src={selectedDoctor.photo} alt="" width={48} height={48} className="size-12 shrink-0 rounded-full object-cover" />
+                <div className="min-w-0">
+                  <p className="truncate font-black">{selectedDoctor.name}</p>
+                  <p className="text-sm text-muted-foreground">{selectedDoctor.specialty} · {selectedDoctor.availability}</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p id="appointment-date-label" className="text-sm font-bold">1. Choose a date</p>
+                {bookableDays.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Loading dates…</p>
+                ) : (
+                  <div role="group" aria-labelledby="appointment-date-label" className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    {bookableDays.map((day) => (
+                      <button
+                        key={day.key}
+                        type="button"
+                        aria-pressed={day.key === activeDay}
+                        onClick={() => {
+                          setAppointmentDay(day.key);
+                          setAppointmentSlot(null);
+                        }}
+                        className={cn(
+                          "shrink-0 rounded-2xl border px-4 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          day.key === activeDay ? "border-primary bg-primary text-primary-foreground" : "border-border bg-surface-soft hover:bg-muted",
+                        )}
+                      >
+                        {day.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <p id="appointment-time-label" className="text-sm font-bold">2. Choose a time</p>
+                <div role="group" aria-labelledby="appointment-time-label" className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+                  {slotOptions.map((slot) => {
+                    const unavailable = slot.isPast || slot.isTaken;
+                    const selected = slot.time === appointmentSlot && !unavailable;
+                    return (
+                      <button
+                        key={slot.time}
+                        type="button"
+                        disabled={unavailable}
+                        aria-pressed={selected}
+                        onClick={() => setAppointmentSlot(slot.time)}
+                        className={cn(
+                          "rounded-2xl border px-3 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          selected
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : unavailable
+                              ? "cursor-not-allowed border-border bg-muted opacity-50"
+                              : "border-border bg-surface-soft hover:bg-muted",
+                        )}
+                      >
+                        {slot.time}
+                        {slot.isTaken ? <span className="block text-[10px] font-semibold">Booked</span> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+                {slotOptions.length > 0 && slotOptions.every((slot) => slot.isPast || slot.isTaken) ? (
+                  <p className="text-sm text-muted-foreground">No times left on this day. Please pick another date.</p>
+                ) : null}
+              </div>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-border bg-surface-soft p-4">
+                <input
+                  type="checkbox"
+                  checked={useStudentInsurance}
+                  onChange={(event) => setUseStudentInsurance(event.target.checked)}
+                  className="mt-0.5 size-5 shrink-0 accent-primary"
+                />
+                <span>
+                  <span className="flex items-center gap-2 font-bold">
+                    <ShieldCheck className="size-4 text-primary" /> Use my student insurance
+                  </span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    See a doctor at {HOSPITAL_NAME} with your university student insurance.
+                  </span>
+                </span>
+              </label>
+
+              <div className="space-y-2">
+                <Label htmlFor="booking-notes">Notes for the doctor</Label>
+                <Textarea
+                  id="booking-notes"
+                  value={bookingNotes}
+                  maxLength={500}
+                  onChange={(event) => setBookingNotes(event.target.value)}
+                  placeholder="Example: neck pain after long meetings"
+                  className="min-h-24 rounded-2xl"
+                />
+              </div>
+
+              <p className={cn("rounded-2xl p-3 text-sm", selectedSlotIso ? "bg-primary/10 font-semibold" : "bg-muted text-muted-foreground")}>
+                {selectedSlotIso
+                  ? `${formatAppointment(selectedSlotIso)} · ${selectedDoctor.name} · ${HOSPITAL_NAME}`
+                  : "Choose a date and time to continue."}
+              </p>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <Button variant="hero" onClick={handleBooking} disabled={bookingMutation.isPending || !selectedSlotIso}>
+                  <CalendarCheck className="size-4" /> {bookingMutation.isPending ? "Booking..." : "Confirm appointment"}
+                </Button>
+                {bookingMessage ? <p role="status" className="text-sm font-semibold text-primary">{bookingMessage}</p> : null}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card id="my-appointments" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+            <CardHeader>
+              <CardTitle className="text-2xl">My appointments</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <BookingList bookings={bookingsQuery.data ?? []} />
+            </CardContent>
+          </Card>
         </div>
       </section>
 
       <section id="profile" className={cn("mx-auto min-h-[calc(100vh-6rem)] max-w-7xl scroll-mt-20 px-4 py-6 sm:px-6 md:py-8 lg:px-8", activeTab !== "profile" && "hidden")}>
         <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-        <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+        <Card id="profile-settings" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="text-2xl">Profile settings</CardTitle>
           </CardHeader>
@@ -977,16 +1287,16 @@ function UniStretchApp() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="30">30 minutes</SelectItem>
-                  <SelectItem value="45">45 minutes</SelectItem>
-                  <SelectItem value="60">60 minutes</SelectItem>
+                  {REMINDER_OPTIONS.map((minutes) => (
+                    <SelectItem key={minutes} value={String(minutes)}>{minutes} minutes</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
           </CardContent>
         </Card>
 
-        <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+        <Card id="review" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
               <Star className="size-6 text-warning" /> Review UniStretch
@@ -1153,20 +1463,66 @@ async function ensureProfile(userId: string, fallbackName: string, username?: st
 
 function BookingList({ bookings }: { bookings: Booking[] }) {
   if (bookings.length === 0) {
-    return <p className="text-sm text-muted-foreground">No saved appointments yet.</p>;
+    return <p className="text-sm text-muted-foreground">No appointments yet. Choose a doctor, date and time above to book one.</p>;
   }
 
+  const nowMs = Date.now();
+  const startsAt = (booking: Booking) => new Date(booking.appointment_time).getTime();
+  const isUpcoming = (booking: Booking) => booking.status === "booked" && startsAt(booking) > nowMs;
+  const upcoming = bookings.filter(isUpcoming).sort((a, b) => startsAt(a) - startsAt(b));
+  const past = bookings
+    .filter((booking) => !isUpcoming(booking))
+    .sort((a, b) => startsAt(b) - startsAt(a))
+    .slice(0, 5);
+
   return (
-    <div className="space-y-2">
-      {bookings.map((booking) => (
-        <div key={booking.id} className="flex items-center justify-between gap-3 rounded-2xl bg-muted p-3 text-sm">
-          <div>
-            <p className="font-bold">{booking.doctor_name}</p>
-            <p className="text-muted-foreground">{booking.specialty}</p>
-          </div>
-          <p className="text-right font-semibold">{new Date(booking.appointment_time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
+    <div className="space-y-5">
+      <div className="space-y-2">
+        <h3 className="text-sm font-bold">Upcoming</h3>
+        {upcoming.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No upcoming appointments.</p>
+        ) : (
+          upcoming.map((booking) => <BookingRow key={booking.id} booking={booking} />)
+        )}
+      </div>
+      {past.length > 0 ? (
+        <div className="space-y-2">
+          <h3 className="text-sm font-bold text-muted-foreground">Past</h3>
+          {past.map((booking) => (
+            <BookingRow key={booking.id} booking={booking} muted />
+          ))}
         </div>
-      ))}
+      ) : null}
+    </div>
+  );
+}
+
+function BookingRow({ booking, muted = false }: { booking: Booking; muted?: boolean }) {
+  const rawNotes = booking.notes ?? "";
+  const insured = rawNotes.startsWith(INSURANCE_TAG);
+  const note = (insured ? rawNotes.slice(INSURANCE_TAG.length) : rawNotes).trim();
+
+  return (
+    <div className={cn("flex flex-col gap-2 rounded-2xl bg-muted p-3 text-sm sm:flex-row sm:items-start sm:justify-between", muted && "opacity-70")}>
+      <div className="min-w-0">
+        <p className="font-bold">{booking.doctor_name}</p>
+        <p className="text-muted-foreground">{booking.specialty}</p>
+        <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+          <MapPin className="size-3" /> {HOSPITAL_NAME}
+        </p>
+        {note ? <p className="mt-1 break-words text-xs text-muted-foreground">“{note}”</p> : null}
+      </div>
+      <div className="space-y-1 sm:text-right">
+        <p className="font-semibold">{formatAppointment(booking.appointment_time)}</p>
+        <div className="flex flex-wrap gap-1 sm:justify-end">
+          {insured ? <Badge variant="secondary">Student insurance</Badge> : null}
+          {booking.status !== "booked" ? (
+            <Badge variant="outline" className="capitalize">
+              {booking.status}
+            </Badge>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }
