@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Activity, ArrowLeft, ArrowRight, House, Stethoscope, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -12,31 +12,54 @@ const steps = [
   { tab: "profile", icon: UserRound, title: "Set a rhythm that suits you", text: "Choose your reminder interval and leave a star rating or suggestion whenever you like." },
 ] satisfies { tab: AppTab; icon: typeof House; title: string; text: string }[];
 
-export function FirstLoginTour({ userId, onNavigate }: { userId: string | undefined; onNavigate: (tab: AppTab) => void }) {
+export function FirstLoginTour({ 
+  userId, 
+  onNavigate, 
+  forceOpen, 
+  onClose 
+}: { 
+  userId: string | undefined; 
+  onNavigate: (tab: AppTab) => void;
+  forceOpen?: boolean;
+  onClose?: () => void;
+}) {
   const [stepIndex, setStepIndex] = useState<number | null>(null);
+  // Keep the latest callback in a ref so the effect below doesn't re-run
+  // (and reset the tour to step 1) every time the parent re-renders.
+  const onNavigateRef = useRef(onNavigate);
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  }, [onNavigate]);
 
   useEffect(() => {
+    if (forceOpen) {
+      setStepIndex(0);
+      onNavigateRef.current("home");
+      return;
+    }
+
     setStepIndex(null);
     if (!userId) return;
     try {
       if (window.localStorage.getItem(`unistretch:tour:v1:${userId}`) === "done") return;
-    } catch { /* The tour still works when browser storage is unavailable. */ }
+    } catch { /* Storage backup */ }
     setStepIndex(0);
-    onNavigate("home");
-  }, [userId, onNavigate]);
+    onNavigateRef.current("home");
+  }, [userId, forceOpen]);
 
   function finish() {
     if (userId) {
-      try { window.localStorage.setItem(`unistretch:tour:v1:${userId}`, "done"); } catch { /* Storage may be disabled. */ }
+      try { window.localStorage.setItem(`unistretch:tour:v1:${userId}`, "done"); } catch { /* Storage backup */ }
     }
     setStepIndex(null);
+    if (onClose) onClose();
   }
 
   function move(index: number) {
     const next = steps[index];
     if (!next) return;
     setStepIndex(index);
-    onNavigate(next.tab);
+    onNavigateRef.current(next.tab);
   }
 
   const step = stepIndex === null ? null : steps[stepIndex];
@@ -44,17 +67,29 @@ export function FirstLoginTour({ userId, onNavigate }: { userId: string | undefi
   const Icon = step.icon;
 
   return (
-    <aside role="dialog" aria-modal="false" aria-labelledby="tour-title" aria-describedby="tour-description" className="fixed inset-x-4 bottom-24 z-50 mx-auto max-w-md rounded-3xl border border-primary/40 bg-card p-5 text-card-foreground shadow-[var(--shadow-mobile-nav)] sm:bottom-28 sm:left-auto sm:right-6 sm:mx-0">
+    <aside 
+      role="dialog" 
+      aria-modal="false" 
+      aria-labelledby="tour-title" 
+      aria-describedby="tour-description" 
+      className="fixed inset-x-4 bottom-36 sm:bottom-40 z-50 mx-auto max-w-md rounded-3xl border border-primary/40 bg-card p-5 text-card-foreground shadow-[var(--shadow-mobile-nav)] sm:left-auto sm:right-6 sm:mx-0"
+    >
       <div className="mb-3 flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-xs font-bold text-primary"><Icon className="size-4" /> {step.tab === "booking" ? "Doctors" : step.tab.charAt(0).toUpperCase() + step.tab.slice(1)} · {stepIndex + 1} of {steps.length}</span>
+        <span className="flex items-center gap-2 text-xs font-bold text-primary">
+          <Icon className="size-4" /> {step.tab === "booking" ? "Doctors" : step.tab.charAt(0).toUpperCase() + step.tab.slice(1)} · {stepIndex + 1} of {steps.length}
+        </span>
         <Button variant="ghost" size="sm" onClick={finish}>Skip tour</Button>
       </div>
       <h2 id="tour-title" className="text-xl font-extrabold">{step.title}</h2>
       <p id="tour-description" className="mt-2 text-sm leading-6 text-muted-foreground">{step.text}</p>
       <Progress value={((stepIndex + 1) / steps.length) * 100} className="my-4 h-1.5" />
       <div className="flex items-center justify-between gap-3">
-        <Button variant="ghost" size="sm" disabled={stepIndex === 0} onClick={() => move(stepIndex - 1)}><ArrowLeft className="size-4" /> Back</Button>
-        <Button variant="wellness" size="sm" onClick={() => stepIndex === steps.length - 1 ? finish() : move(stepIndex + 1)}>{stepIndex === steps.length - 1 ? "Get started" : "Next"}<ArrowRight className="size-4" /></Button>
+        <Button variant="ghost" size="sm" disabled={stepIndex === 0} onClick={() => move(stepIndex - 1)}>
+          <ArrowLeft className="size-4" /> Back
+        </Button>
+        <Button variant="wellness" size="sm" onClick={() => stepIndex === steps.length - 1 ? finish() : move(stepIndex + 1)}>
+          {stepIndex === steps.length - 1 ? "Get started" : "Next"}<ArrowRight className="size-4" />
+        </Button>
       </div>
     </aside>
   );

@@ -25,10 +25,11 @@ import {
   UserRound,
   Video,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 
 import wellnessImage from "@/assets/unistretch-wellness.jpg";
+import { FirstLoginTour, type AppTab } from "@/components/first-login-tour";
 import { StretchStepGuide } from "@/components/stretch-step-guide";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -83,6 +84,9 @@ const reviewSchema = z.object({
     .max(600, "Feedback must be 600 characters or less"),
 });
 
+// Only written while the timer is paused, so its presence means "paused with this value".
+const SITTING_TIMER_KEY = "unistretch:sitting-timer:v1";
+
 type Profile = Tables<"profiles">;
 type Booking = Tables<"doctor_bookings">;
 type Review = Tables<"app_reviews">;
@@ -122,8 +126,6 @@ const stretchVideos = [
     youtubeId: "fdD7CgN5FGg",
   },
 ];
-
-type AppTab = "home" | "stretch" | "booking" | "profile";
 
 const doctors = [
   {
@@ -184,8 +186,10 @@ function UniStretchApp() {
   const [authNotice, setAuthNotice] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [secondsSitting, setSecondsSitting] = useState(42 * 60);
+  const [secondsSitting, setSecondsSitting] = useState(0);
   const [isRunning, setIsRunning] = useState(true);
+  const [timerHydrated, setTimerHydrated] = useState(false);
+  const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
   const [snoozedUntil, setSnoozedUntil] = useState<number | null>(null);
   const [selectedDoctor, setSelectedDoctor] = useState<(typeof doctors)[number]>(
     doctors[0] ?? {
@@ -207,12 +211,12 @@ function UniStretchApp() {
   const [exercise, setExercise] = useState<{ videoIndex: number; startedAt: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
-  function openTab(id: AppTab, targetId: string = id) {
+  const openTab = useCallback((id: AppTab, targetId: string = id) => {
     setActiveTab(id);
     window.setTimeout(() => {
       document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
-  }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -331,6 +335,36 @@ function UniStretchApp() {
     const tick = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(tick);
   }, [exercise]);
+
+  // Restore a paused timer after mount (done in an effect so SSR/hydration stays consistent).
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SITTING_TIMER_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as { seconds?: unknown };
+        if (typeof saved.seconds === "number" && Number.isFinite(saved.seconds) && saved.seconds >= 0) {
+          setSecondsSitting(Math.floor(saved.seconds));
+          setIsRunning(false);
+        }
+      }
+    } catch { /* storage unavailable or corrupt: start from 00:00 */ }
+    setTimerHydrated(true);
+  }, []);
+
+  // Remember the value while paused; forget it once the timer is running again.
+  useEffect(() => {
+    if (!timerHydrated) return;
+    try {
+      if (isRunning) window.localStorage.removeItem(SITTING_TIMER_KEY);
+      else window.localStorage.setItem(SITTING_TIMER_KEY, JSON.stringify({ seconds: secondsSitting }));
+    } catch { /* storage unavailable */ }
+  }, [timerHydrated, isRunning, secondsSitting]);
+
+  // Pop up once each time the reminder becomes due (not while paused or mid-exercise).
+  const shouldAlertStretch = timerHydrated && isReminderDue && isRunning && !exercise;
+  useEffect(() => {
+    if (shouldAlertStretch) setIsReminderDialogOpen(true);
+  }, [shouldAlertStretch]);
 
   const completeStretchMutation = useMutation({
     mutationFn: async () => {
@@ -1030,6 +1064,39 @@ function UniStretchApp() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isReminderDialogOpen} onOpenChange={setIsReminderDialogOpen}>
+        <DialogContent className="rounded-3xl border-border bg-card">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TimerReset className="size-5 text-warning" /> Time to stand and stretch
+            </DialogTitle>
+            <DialogDescription>
+              You have been sitting for {sittingMinutes} minutes. Take a short stretch break to earn 10 points and keep your streak going.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              variant="hero"
+              onClick={() => {
+                setIsReminderDialogOpen(false);
+                handleCompleteStretch();
+              }}
+            >
+              Start stretch <ArrowRight className="size-4" />
+            </Button>
+            <Button
+              variant="soft"
+              onClick={() => {
+                setIsReminderDialogOpen(false);
+                setSnoozedUntil(Date.now() + 5 * 60 * 1000);
+              }}
+            >
+              Snooze 5 min
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isAuthDialogOpen} onOpenChange={setIsAuthDialogOpen}>
         <DialogContent className="rounded-3xl border-border bg-card">
           <DialogHeader>
@@ -1070,6 +1137,8 @@ function UniStretchApp() {
           </Button>
         </DialogContent>
       </Dialog>
+
+      <FirstLoginTour userId={user?.id} onNavigate={openTab} />
     </main>
   );
 }
