@@ -6,7 +6,7 @@ import { Progress } from "@/components/ui/progress";
 export type AppTab = "home" | "stretch" | "booking" | "profile";
 
 const steps = [
-  { tab: "home", icon: House, title: "Make room for a little movement", text: "Check your sitting timer, take a stretch break, and watch your points and daily streak grow." },
+  { tab: "home", icon: House, title: "Make room for a little movement", text: "Your timer will remind you when it is time to move. Complete the guided stretch timer to earn 10 points, then watch your points and daily streak grow." },
   { tab: "stretch", icon: Activity, title: "Find your feel-good stretch", text: "Filter by body area. Open Details for pictures of each step, or start an exercise and finish its timer to earn 10 points." },
   { tab: "booking", icon: Stethoscope, title: "Meet your care team", text: "Choose a doctor profile, add a note about how you feel, and confirm your online appointment." },
   { tab: "profile", icon: UserRound, title: "Set a rhythm that suits you", text: "Choose your reminder interval and leave a star rating or suggestion whenever you like." },
@@ -16,11 +16,13 @@ export function FirstLoginTour({
   userId, 
   onNavigate, 
   forceOpen, 
+  replayToken,
   onClose 
 }: { 
   userId: string | undefined; 
   onNavigate: (tab: AppTab) => void;
   forceOpen?: boolean;
+  replayToken?: number;
   onClose?: () => void;
 }) {
   const [stepIndex, setStepIndex] = useState<number | null>(null);
@@ -45,7 +47,7 @@ export function FirstLoginTour({
     } catch { /* Storage backup */ }
     setStepIndex(0);
     onNavigateRef.current("home");
-  }, [userId, forceOpen]);
+  }, [userId, forceOpen, replayToken]);
 
   function finish() {
     if (userId) {

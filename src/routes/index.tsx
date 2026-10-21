@@ -25,12 +25,12 @@ import {
   Stethoscope,
   TimerReset,
   UserRound,
-  Video,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 
 import wellnessImage from "@/assets/unistretch-wellness.jpg";
+import sportMassagePoster from "@/assets/sport-massage-poster.jpg";
 import doctorPrincess from "@/assets/doctor-princess.jpg";
 import doctorRyu from "@/assets/doctor-ryu.jpg";
 import doctorOwen from "@/assets/doctor-owen.jpg";
@@ -41,6 +41,7 @@ import { StretchStepGuide } from "@/components/stretch-step-guide";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Calendar } from "@/components/ui/calendar";
 import {
   Dialog,
   DialogContent,
@@ -51,6 +52,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -59,6 +61,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { lovable } from "@/integrations/lovable";
 import { supabase } from "@/integrations/supabase/client";
@@ -93,15 +96,22 @@ const reviewSchema = z.object({
 
 const REMINDER_OPTIONS = [5, 10, 15, 20, 30, 45, 60];
 
-const HOSPITAL_NAME = "Uni Hospital";
+const HOSPITAL_NAME = "Thammasat Hospital";
 const DOCTOR_HOURS = "Mon–Fri · 09:00–16:00";
+const OWEN_HOURS = "Sat–Sun · 09:00–16:00";
 const APPOINTMENT_SLOTS = ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00"];
 const BANGKOK_TZ = "Asia/Bangkok";
 // Stored at the start of `doctor_bookings.notes` until the table has its own insurance column.
 const INSURANCE_TAG = "[Student insurance]";
+const TERMINAL_BOOKING_STATUSES = new Set(["cancelled", "canceled", "rejected", "completed", "complete", "no_show"]);
+const isActiveBookingStatus = (status: string) => !TERMINAL_BOOKING_STATUSES.has(status.trim().toLowerCase());
 
 // Only written while the timer is paused, so its presence means "paused with this value".
 const SITTING_TIMER_KEY = "unistretch:sitting-timer:v1";
+const APP_PREFERENCES_KEY = "unistretch:app-preferences:v1";
+
+type AppLanguage = "en" | "th";
+type ReminderSound = "chime" | "bell" | "aggressive" | "kims-buzzer";
 
 type Profile = Tables<"profiles">;
 type Booking = Tables<"doctor_bookings">;
@@ -120,28 +130,69 @@ const stretchVideos = [
   {
     title: "Neck reset",
     minutes: "3 min",
-    tag: "Neck & shoulder",
+    tag: "Neck",
     description: "Slow side bends and chin tucks to reduce screen posture tension.",
     accent: "bg-trust/15 text-trust",
     youtubeId: "2NOsE-VPpkE",
+    guideIndex: 0,
   },
   {
     title: "Lower back flow",
     minutes: "5 min",
-    tag: "Lumbar care",
+    tag: "Back",
     description: "Seated cat-cow, hip hinge, and gentle twists for long sitting blocks.",
     accent: "bg-success/15 text-success",
     youtubeId: "0wAw1-1MHa4",
+    guideIndex: 1,
   },
   {
     title: "Wrist break",
     minutes: "2 min",
-    tag: "Keyboard relief",
+    tag: "Wrist",
     description: "Forearm glides and palm stretches for typing-heavy workdays.",
     accent: "bg-event/20 text-event-foreground",
     youtubeId: "fdD7CgN5FGg",
+    guideIndex: 2,
+  },
+  {
+    title: "Desk neck release",
+    minutes: "4 min",
+    tag: "Neck",
+    description: "A gentle physiotherapist-led neck and shoulder routine for a work or study break.",
+    accent: "bg-trust/15 text-trust",
+    youtubeId: "FRNtLrMf-1A",
+    guideIndex: 0,
+  },
+  {
+    title: "Upper back desk reset",
+    minutes: "5 min",
+    tag: "Back",
+    description: "A short physical therapist routine for upper-back tension from desk work.",
+    accent: "bg-success/15 text-success",
+    youtubeId: "TMDX7hdQKSY",
+    guideIndex: 1,
+  },
+  {
+    title: "Hip flexor stretch",
+    minutes: "7 min",
+    tag: "Hip",
+    description: "Gentle hip flexor stretches for people who spend long periods sitting.",
+    accent: "bg-warning/20 text-warning-foreground",
+    youtubeId: "B5eAei_ISG4",
+    guideIndex: 3,
+  },
+  {
+    title: "Shoulder mobility",
+    minutes: "9 min",
+    tag: "Shoulder",
+    description: "A guided routine for stiff shoulders and rounded desk posture.",
+    accent: "bg-event/20 text-event-foreground",
+    youtubeId: "8jqmWDjjERM",
+    guideIndex: 4,
   },
 ];
+
+const videoFilters = ["All", ...new Set(stretchVideos.map((video) => video.tag))];
 
 const doctors = [
   {
@@ -159,7 +210,7 @@ const doctors = [
   {
     name: "Dr. Owen Wong",
     specialty: "Rehab medicine",
-    availability: DOCTOR_HOURS,
+    availability: OWEN_HOURS,
     photo: doctorOwen,
   },
 ];
@@ -167,7 +218,7 @@ const doctors = [
 type BookableDay = { key: string; label: string };
 
 // Date helpers use Thailand time (UTC+7) so slots mean the same thing on any device.
-function getBookableDays(from: number, count = 10): BookableDay[] {
+function getBookableDays(from: number, count = 10, weekendsOnly = false): BookableDay[] {
   const keyFormat = new Intl.DateTimeFormat("en-CA", { timeZone: BANGKOK_TZ, year: "numeric", month: "2-digit", day: "2-digit" });
   const labelFormat = new Intl.DateTimeFormat("en-GB", { timeZone: BANGKOK_TZ, weekday: "short", day: "numeric", month: "short" });
   const weekdayFormat = new Intl.DateTimeFormat("en-US", { timeZone: BANGKOK_TZ, weekday: "short" });
@@ -175,7 +226,7 @@ function getBookableDays(from: number, count = 10): BookableDay[] {
   for (let offset = 0; days.length < count && offset < 30; offset++) {
     const date = new Date(from + offset * 24 * 60 * 60 * 1000);
     const weekday = weekdayFormat.format(date);
-    if (weekday === "Sat" || weekday === "Sun") continue;
+    if (weekendsOnly ? weekday !== "Sat" && weekday !== "Sun" : weekday === "Sat" || weekday === "Sun") continue;
     days.push({ key: keyFormat.format(date), label: labelFormat.format(date).replace(",", "") });
   }
   return days;
@@ -193,13 +244,27 @@ function formatAppointment(iso: string) {
   });
 }
 
+function parseCalendarDay(dayKey: string | null) {
+  if (!dayKey) return undefined;
+  const [year, month, day] = dayKey.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day);
+}
+
+function formatCalendarDay(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 const rewardPreviews = [
   { id: "drink", title: "Healthy drink voucher", points: 100, icon: Coffee, description: "A refreshing reward for your next stretch milestone." },
   { id: "wellness", title: "Wellness class pass", points: 250, icon: Ticket, description: "Make time for a guided wellness session." },
   { id: "desk", title: "Desk wellness kit", points: 500, icon: Gift, description: "A little extra care for your everyday workspace." },
+  { id: "consult", title: "Wellness consult", points: 750, icon: HeartPulse, description: "Get practical guidance for a more comfortable workday." },
+  { id: "day-off", title: "Wellness day pass", points: 1000, icon: Sparkles, description: "Make space for a full day focused on your wellbeing." },
 ];
-
-const eventHighlights = ["Posture screening", "Desk setup check", "Mini stretch class"];
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -231,6 +296,17 @@ function UniStretchApp() {
   const [authNotice, setAuthNotice] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [displayNameDraft, setDisplayNameDraft] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [isAccountSaving, setIsAccountSaving] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [reminderSound, setReminderSound] = useState<ReminderSound>("chime");
+  const [language, setLanguage] = useState<AppLanguage>("en");
+  const [preferencesHydrated, setPreferencesHydrated] = useState(false);
+  const [guestReminderMinutes, setGuestReminderMinutes] = useState(45);
   const [secondsSitting, setSecondsSitting] = useState(0);
   const [isRunning, setIsRunning] = useState(true);
   const [timerHydrated, setTimerHydrated] = useState(false);
@@ -250,6 +326,7 @@ function UniStretchApp() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [bookableDays, setBookableDays] = useState<BookableDay[]>([]);
   const [appointmentDay, setAppointmentDay] = useState<string | null>(null);
+  const [isAppointmentCalendarOpen, setIsAppointmentCalendarOpen] = useState(false);
   const [appointmentSlot, setAppointmentSlot] = useState<string | null>(null);
   const [useStudentInsurance, setUseStudentInsurance] = useState(true);
   const [reviewRating, setReviewRating] = useState(0);
@@ -258,8 +335,12 @@ function UniStretchApp() {
   const [reviewMessage, setReviewMessage] = useState("");
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(false);
   const [selectedReward, setSelectedReward] = useState<(typeof rewardPreviews)[number] | null>(null);
+  const [isRewardCatalogOpen, setIsRewardCatalogOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<AppTab>("home");
+  const [videoFilter, setVideoFilter] = useState("All");
   const [exercise, setExercise] = useState<{ videoIndex: number; startedAt: number } | null>(null);
+  const [streakCelebration, setStreakCelebration] = useState<number | null>(null);
+  const [tourReplayToken, setTourReplayToken] = useState(0);
   const [now, setNow] = useState(() => Date.now());
 
   // Reset to 00:00 and restart the wall-clock baseline (a bare setSecondsSitting(0) would be overwritten by the next sync).
@@ -369,7 +450,35 @@ function UniStretchApp() {
   });
 
   const profile = profileQuery.data;
-  const reminderMinutes = profile?.reminder_interval_minutes ?? 45;
+  const isThai = language === "th";
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(APP_PREFERENCES_KEY);
+      if (saved) {
+        const preferences = JSON.parse(saved) as { soundEnabled?: unknown; reminderSound?: unknown; language?: unknown };
+        if (typeof preferences.soundEnabled === "boolean") setSoundEnabled(preferences.soundEnabled);
+        if (preferences.reminderSound === "chime" || preferences.reminderSound === "bell" || preferences.reminderSound === "aggressive" || preferences.reminderSound === "kims-buzzer") setReminderSound(preferences.reminderSound);
+        if (preferences.language === "en" || preferences.language === "th") setLanguage(preferences.language);
+      }
+    } catch { /* Ignore invalid or unavailable browser storage. */ }
+    setPreferencesHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
+
+  useEffect(() => {
+    if (!preferencesHydrated) return;
+    try {
+      window.localStorage.setItem(APP_PREFERENCES_KEY, JSON.stringify({ soundEnabled, reminderSound, language }));
+    } catch { /* Preference storage is optional. */ }
+  }, [preferencesHydrated, soundEnabled, reminderSound, language]);
+
+  useEffect(() => {
+    if (profile?.display_name) setDisplayNameDraft(profile.display_name);
+  }, [profile?.display_name]);
+  const reminderMinutes = profile?.reminder_interval_minutes ?? guestReminderMinutes;
   const sittingMinutes = Math.floor(secondsSitting / 60);
   const sittingProgress = Math.min(100, (secondsSitting / (reminderMinutes * 60)) * 100);
   const isReminderDue = secondsSitting >= reminderMinutes * 60 && (!snoozedUntil || Date.now() > snoozedUntil);
@@ -406,6 +515,12 @@ function UniStretchApp() {
     return () => window.clearInterval(tick);
   }, [exercise]);
 
+  useEffect(() => {
+    if (streakCelebration === null) return;
+    const timeout = window.setTimeout(() => setStreakCelebration(null), 3600);
+    return () => window.clearTimeout(timeout);
+  }, [streakCelebration]);
+
   // Restore a paused timer after mount (done in an effect so SSR/hydration stays consistent).
   useEffect(() => {
     try {
@@ -433,8 +548,10 @@ function UniStretchApp() {
   // Pop up once each time the reminder becomes due (not while paused or mid-exercise).
   const shouldAlertStretch = timerHydrated && isReminderDue && isRunning && !exercise;
   useEffect(() => {
-    if (shouldAlertStretch) setIsReminderDialogOpen(true);
-  }, [shouldAlertStretch]);
+    if (!shouldAlertStretch) return;
+    setIsReminderDialogOpen(true);
+    if (soundEnabled) playReminderSound(reminderSound);
+  }, [shouldAlertStretch, soundEnabled, reminderSound]);
 
   const completeStretchMutation = useMutation({
     mutationFn: async () => {
@@ -472,10 +589,12 @@ function UniStretchApp() {
       if (profileError) throw profileError;
       return { nextPoints, nextStreak };
     },
-    onSuccess: () => {
+    onSuccess: ({ nextStreak }) => {
       resetSittingTimer();
       setSnoozedUntil(null);
       setExercise(null);
+      setIsReminderDialogOpen(false);
+      setStreakCelebration(nextStreak);
       queryClient.invalidateQueries({ queryKey: ["unistretch", "profile", user?.id] });
     },
   });
@@ -498,7 +617,7 @@ function UniStretchApp() {
       if (!selectedSlotIso) throw new Error("Please choose a date and time.");
       const alreadyBooked = (bookingsQuery.data ?? []).some(
         (booking) =>
-          booking.status === "booked" &&
+          isActiveBookingStatus(booking.status) &&
           booking.doctor_name === selectedDoctor.name &&
           new Date(booking.appointment_time).getTime() === new Date(selectedSlotIso).getTime(),
       );
@@ -522,7 +641,7 @@ function UniStretchApp() {
     onSuccess: () => {
       setBookingNotes("");
       setAppointmentSlot(null);
-      setBookingMessage("Your appointment is confirmed.");
+      setBookingMessage("");
       queryClient.invalidateQueries({ queryKey: ["unistretch", "bookings", user?.id] });
       openTab("booking", "my-appointments");
     },
@@ -557,8 +676,10 @@ function UniStretchApp() {
   });
 
   useEffect(() => {
-    if (activeTab === "booking") setBookableDays(getBookableDays(Date.now()));
-  }, [activeTab]);
+    if (activeTab === "booking") {
+      setBookableDays(getBookableDays(Date.now(), 10, selectedDoctor.name === "Dr. Owen Wong"));
+    }
+  }, [activeTab, selectedDoctor.name]);
 
   const activeDay =
     appointmentDay && bookableDays.some((day) => day.key === appointmentDay) ? appointmentDay : (bookableDays[0]?.key ?? null);
@@ -569,7 +690,7 @@ function UniStretchApp() {
         const isPast = startsAt < Date.now() + 30 * 60 * 1000;
         const isTaken = (bookingsQuery.data ?? []).some(
           (booking) =>
-            booking.status === "booked" &&
+            isActiveBookingStatus(booking.status) &&
             booking.doctor_name === selectedDoctor.name &&
             new Date(booking.appointment_time).getTime() === startsAt,
         );
@@ -578,6 +699,9 @@ function UniStretchApp() {
     : [];
   const selectedSlotIso =
     slotOptions.find((slot) => slot.time === appointmentSlot && !slot.isPast && !slot.isTaken)?.iso ?? null;
+  const filteredStretchVideos = stretchVideos
+    .map((video, index) => ({ video, index }))
+    .filter(({ video }) => videoFilter === "All" || video.tag === videoFilter);
 
   const jumpItems: Record<AppTab, JumpItem[]> = {
     home: [
@@ -589,7 +713,6 @@ function UniStretchApp() {
     ],
     stretch: [
       ...(exercise ? [{ id: "exercise", label: "Exercise" }] : []),
-      { id: "stretch-guide", label: "Guide" },
       { id: "stretch-videos", label: "Videos" },
     ],
     booking: [
@@ -599,8 +722,10 @@ function UniStretchApp() {
       { id: "my-appointments", label: "My appointments" },
     ],
     profile: [
-      { id: "profile-settings", label: "Settings" },
-      { id: "review", label: "Review" },
+      { id: "profile-settings", label: isThai ? "บัญชี" : "Account" },
+      { id: "app-preferences", label: isThai ? "การตั้งค่า" : "Preferences" },
+      { id: "profile-help", label: isThai ? "ช่วยเหลือ" : "Help" },
+      { id: "review", label: isThai ? "รีวิว" : "Review" },
     ],
   };
 
@@ -659,6 +784,62 @@ function UniStretchApp() {
     await supabase.auth.signOut();
   }
 
+  async function handleSaveDisplayName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAccountMessage("");
+    setAccountError("");
+    const name = displayNameDraft.trim();
+    if (!user) {
+      setIsAuthDialogOpen(true);
+      return;
+    }
+    if (!name) {
+      setAccountError(isThai ? "กรุณากรอกชื่อที่แสดง" : "Enter a display name.");
+      return;
+    }
+    setIsAccountSaving(true);
+    try {
+      const { error } = await supabase.from("profiles").update({ display_name: name }).eq("id", user.id);
+      if (error) throw error;
+      await queryClient.invalidateQueries({ queryKey: ["unistretch", "profile", user.id] });
+      setAccountMessage(isThai ? "บันทึกชื่อแล้ว" : "Display name saved.");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "Could not save your name.");
+    } finally {
+      setIsAccountSaving(false);
+    }
+  }
+
+  async function handleChangePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAccountMessage("");
+    setAccountError("");
+    if (!user) {
+      setIsAuthDialogOpen(true);
+      return;
+    }
+    if (newPassword.length < 8) {
+      setAccountError(isThai ? "รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร" : "Password must be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setAccountError(isThai ? "รหัสผ่านไม่ตรงกัน" : "Passwords do not match.");
+      return;
+    }
+    setIsAccountSaving(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setAccountMessage(isThai ? "เปลี่ยนรหัสผ่านแล้ว" : "Password updated.");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "Could not update your password.");
+    } finally {
+      setIsAccountSaving(false);
+    }
+  }
+
   function requireSignedIn() {
     if (user) return true;
     setIsAuthDialogOpen(true);
@@ -673,7 +854,6 @@ function UniStretchApp() {
 
   function handleFinishExercise() {
     if (!exercise || !exerciseDone) return;
-    setExercise(null);
     if (user) {
       completeStretchMutation.mutate();
     } else {
@@ -696,6 +876,23 @@ function UniStretchApp() {
 
   return (
     <main className="min-h-screen overflow-x-clip bg-background pb-28 text-foreground">
+      {streakCelebration !== null ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="streak-toast fixed bottom-24 left-4 right-4 z-[60] mx-auto flex max-w-sm items-center gap-4 rounded-3xl border border-warning-foreground/20 bg-gradient-to-r from-warning via-event to-destructive p-4 text-warning-foreground shadow-[var(--shadow-elevated)] sm:bottom-8"
+        >
+          <div className="relative flex size-14 shrink-0 items-center justify-center rounded-2xl bg-warning-foreground/15">
+            <Flame className="absolute size-9 fill-destructive/30 stroke-destructive" aria-hidden="true" />
+            <Flame className="streak-flame-fill relative size-8 fill-warning stroke-warning" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-lg font-black">Streak on fire!</p>
+            <p className="text-sm font-semibold">+10 points · {streakCelebration} day streak</p>
+          </div>
+          <button type="button" className="rounded-full px-2 py-1 text-2xl leading-none hover:bg-warning-foreground/15" onClick={() => setStreakCelebration(null)} aria-label="Dismiss streak celebration">×</button>
+        </div>
+      ) : null}
       <section id="home" className={cn("relative scroll-mt-4 border-b border-border bg-[image:var(--gradient-hero)]", activeTab !== "home" && "hidden")}>
         <div className="absolute inset-x-0 top-0 h-2 bg-[image:var(--gradient-strip)]" />
         <div className={cn("mx-auto grid max-w-7xl gap-8 px-4 pt-5 sm:px-6 lg:px-8 lg:pt-6", user ? "pb-5" : "min-h-[80vh] pb-10 lg:grid-cols-[1.05fr_0.95fr]")}>
@@ -799,32 +996,31 @@ function UniStretchApp() {
       )}
 
       <section id="timer" className={cn("mx-auto max-w-7xl scroll-mt-20 px-4 py-8 sm:px-6 lg:px-8", activeTab !== "home" && "hidden")}>
-        <div className="grid gap-6 lg:grid-cols-[1fr_0.75fr]">
+        <div className="grid items-start gap-6 lg:grid-cols-[1fr_0.75fr]">
         <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="flex items-center gap-2 text-2xl">
                 <Clock3 className="size-6 text-primary" /> Sitting reminder
               </CardTitle>
-              <p className="mt-2 text-sm text-muted-foreground">We'll remind you to stand up at the break length you pick below.</p>
             </div>
             <div className="flex gap-2">
-              <Button variant="soft" size="icon" onClick={() => setIsRunning((value) => !value)} aria-label={isRunning ? "Pause timer" : "Start timer"}>
-                {isRunning ? <Pause className="size-4" /> : <Play className="size-4" />}
+              <Button variant="soft" size="sm" className="h-11 rounded-2xl px-4" onClick={() => setIsRunning((value) => !value)} aria-label={isRunning ? "Pause timer" : "Start timer"}>
+                {isRunning ? <><Pause className="size-4" /> Pause</> : <><Play className="size-4" /> Start</>}
               </Button>
-              <Button variant="soft" size="icon" onClick={resetSittingTimer} aria-label="Reset timer">
+              <Button variant="soft" size="icon" className="h-11 w-11 rounded-2xl" onClick={resetSittingTimer} aria-label="Reset timer">
                 <RotateCcw className="size-4" />
               </Button>
             </div>
           </CardHeader>
           <CardContent className="grid gap-6 lg:grid-cols-[0.85fr_1.15fr]">
-            <div className="rounded-3xl bg-muted p-6 text-center">
+            <div className="flex flex-col justify-center px-4 py-6 text-center sm:px-6">
               <p className="text-sm font-semibold text-muted-foreground">Current sitting block</p>
               <p className="mt-3 text-6xl font-black tabular-nums">{formattedTime}</p>
               <p className="mt-2 text-sm text-muted-foreground">Target break every {reminderMinutes} minutes</p>
             </div>
-            <div className="space-y-4">
-              <div className={cn("rounded-3xl border p-5", isReminderDue ? "border-warning bg-warning/15" : "border-border bg-surface-soft")}>
+            <div className="space-y-4 lg:border-l lg:border-border lg:pl-6">
+              <div className={cn("space-y-4", isReminderDue && "rounded-r-2xl border-l-4 border-warning bg-warning/10 py-3 pl-4 pr-3")}>
                 <div className="flex items-start gap-3">
                   <div className={cn("flex size-11 shrink-0 items-center justify-center rounded-2xl", isReminderDue ? "bg-warning text-warning-foreground" : "bg-success text-success-foreground")}>
                     {isReminderDue ? <TimerReset className="size-5" /> : <ShieldCheck className="size-5" />}
@@ -833,7 +1029,7 @@ function UniStretchApp() {
                     <p className="font-bold">{isReminderDue ? "Time to stand and stretch" : "You are inside a healthy sitting block"}</p>
                     <p className="mt-1 text-sm leading-6 text-muted-foreground">
                       {isReminderDue
-                        ? "Take a two-minute reset now or snooze once if you are in a meeting."
+                        ? "You have been sitting for a while. Take a short stretch break now."
                         : "UniStretch will nudge you when your sitting block becomes too long."}
                     </p>
                   </div>
@@ -843,82 +1039,70 @@ function UniStretchApp() {
                     Complete stretch
                     <ArrowRight className="size-4" />
                   </Button>
-                  <Button variant="soft" onClick={() => setSnoozedUntil(Date.now() + 5 * 60 * 1000)}>
-                    Snooze 5 min
-                  </Button>
+                  {isReminderDue ? (
+                    <Button variant="soft" onClick={() => setSnoozedUntil(Date.now() + 5 * 60 * 1000)}>
+                      Snooze 5 min
+                    </Button>
+                  ) : null}
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">Finish the short exercise first — then you get 10 points.</p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="home-reminder-interval">Remind me every</Label>
-                <Select
-                  value={String(reminderMinutes)}
-                  onValueChange={(value) => (user ? updateReminderMutation.mutate(Number(value)) : setIsAuthDialogOpen(true))}
-                >
-                  <SelectTrigger id="home-reminder-interval" className="rounded-2xl">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {REMINDER_OPTIONS.map((minutes) => (
-                      <SelectItem key={minutes} value={String(minutes)}>{minutes} minutes</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               </div>
             </div>
           </CardContent>
         </Card>
 
-        <Card id="streak" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+        <Card id="streak" className="scroll-mt-20 overflow-hidden rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
-              <Flame className="size-6 text-event-foreground" /> Streak motivation
+              <Flame className="size-6 text-event-foreground" /> Your movement
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
-            <div className="rounded-3xl bg-[image:var(--gradient-points)] p-6 text-primary-foreground shadow-[var(--shadow-soft)]">
-              <p className="text-sm font-semibold opacity-90">Total points</p>
-              <p className="mt-2 text-5xl font-black">{streakPoints}</p>
-              <p className="mt-3 text-sm opacity-90">{currentStreak} day active stretch streak</p>
-            </div>
-            <div id="rewards" className="scroll-mt-24 space-y-3 border-b border-border pb-5">
-              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-                <h3 className="flex min-w-0 items-center gap-2 font-bold"><Gift className="size-4 shrink-0 text-primary" /> Rewards</h3>
-                <Badge variant="outline" className="shrink-0">Coming soon</Badge>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-3xl bg-[image:var(--gradient-points)] p-5 text-primary-foreground shadow-[var(--shadow-soft)]">
+                <p className="text-sm font-semibold opacity-90">Points collected</p>
+                <p className="mt-2 text-4xl font-black">{streakPoints}</p>
+                <p className="mt-1 text-sm opacity-90">Ready for future rewards</p>
+                <Button variant="ghost" className="mt-3 h-auto w-fit justify-start rounded-xl p-0 text-sm font-bold text-primary-foreground hover:bg-primary-foreground/10 hover:text-primary-foreground" onClick={() => openTab("stretch")}>
+                  Start a stretch <ArrowRight className="size-4" />
+                </Button>
               </div>
-              {rewardPreviews.map((reward) => {
+              <div className="relative flex items-center justify-between gap-3 overflow-hidden rounded-3xl bg-gradient-to-br from-warning via-event to-destructive p-5 text-warning-foreground shadow-[var(--shadow-card)]">
+                <div className="relative z-10">
+                  <p className="text-sm font-bold">Current rhythm</p>
+                  <p className="mt-2 flex items-baseline gap-2 text-4xl font-black tabular-nums">{currentStreak}<span className="text-base font-bold">days</span></p>
+                  <p className="mt-1 text-sm font-medium">Keep your streak glowing.</p>
+                </div>
+                <div className="relative flex size-16 shrink-0 items-end justify-center rounded-full bg-warning-foreground/10 p-2 sm:size-20" aria-hidden="true">
+                  <Flame className="absolute bottom-2 size-12 fill-destructive/20 stroke-destructive sm:size-14" />
+                  <Flame className="streak-flame-fill relative z-10 size-10 fill-warning stroke-warning sm:size-12" />
+                </div>
+              </div>
+            </div>
+            <div id="rewards" className="scroll-mt-24 space-y-3">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <div>
+                  <h3 className="flex min-w-0 items-center gap-2 font-bold"><Gift className="size-4 shrink-0 text-primary" /> Rewards to look forward to</h3>
+                </div>
+                <Button variant="ghost" size="sm" className="shrink-0 px-2 text-primary" onClick={() => setIsRewardCatalogOpen(true)}>
+                  More rewards
+                </Button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {rewardPreviews.slice(0, 3).map((reward) => {
                 const Icon = reward.icon;
-                const remaining = Math.max(0, reward.points - streakPoints);
                 return (
-                  <div key={reward.id} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-2xl border border-border bg-surface-soft p-3">
+                  <button type="button" key={reward.id} onClick={() => setSelectedReward(reward)} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-2xl border border-border bg-surface-soft p-3 text-left transition hover:border-primary/50 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-event/20 text-event-foreground"><Icon className="size-5" /></div>
                     <div className="min-w-0">
                       <p className="text-sm font-bold">{reward.title}</p>
-                      <p className="mt-1 text-xs font-semibold text-primary">{reward.points} pts</p>
-                      <Progress value={Math.min(100, streakPoints / reward.points * 100)} className="mt-2 h-1.5" />
-                      <p className="mt-1 text-xs text-muted-foreground">{remaining ? `${remaining} points to go` : "Points goal reached"}</p>
+                      <p className="mt-1 text-xs font-semibold text-primary">{reward.points} points</p>
                     </div>
-                    <Button variant="soft" size="icon" className="shrink-0" aria-label={`View ${reward.title}`} title={`View ${reward.title}`} onClick={() => setSelectedReward(reward)}><ArrowRight className="size-4" /></Button>
-                  </div>
+                    <ArrowRight className="size-4 text-muted-foreground" />
+                  </button>
                 );
               })}
+              </div>
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              {["Mon", "Tue", "Wed", "Thu", "Fri"].map((day, index) => (
-                <div
-                  key={day}
-                  className={cn(
-                    "rounded-2xl border p-3 text-center text-sm font-bold",
-                    index < Math.min(currentStreak, 5) ? "border-success bg-success/15 text-success" : "border-border bg-muted text-muted-foreground",
-                  )}
-                >
-                  {day}
-                </div>
-              ))}
-            </div>
-            <p className="text-sm leading-6 text-muted-foreground">
-              Each stretch you finish adds 10 points and keeps your streak going.
-            </p>
           </CardContent>
         </Card>
         </div>
@@ -928,24 +1112,57 @@ function UniStretchApp() {
         <Card className="rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
-              <HeartPulse className="size-6 text-destructive" /> Health check up event
+              <HeartPulse className="size-6 text-destructive" /> Health & wellness events
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-3xl bg-event p-5 text-event-foreground">
-              <p className="text-sm font-bold uppercase opacity-80">Company wellness announcement</p>
-              <h3 className="mt-2 text-3xl font-black">Ergo Day: Posture + Spine Screening</h3>
-              <p className="mt-3 leading-7">
-                Friday, 09:00–16:00. Join a desk setup check, posture scan, and 10-minute consult for office syndrome risk.
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {eventHighlights.map((item) => (
-                <div key={item} className="rounded-2xl bg-muted p-4 text-sm font-semibold">
-                  {item}
+            <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-[var(--shadow-card)]">
+              <div className="grid md:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+                <div className="bg-muted">
+                  <img
+                    src={sportMassagePoster}
+                    alt="Sport massage event schedule poster for October 28 and November 4, 2026 at Thammasat University"
+                    width={1144}
+                    height={1430}
+                    loading="lazy"
+                    className="mx-auto h-auto w-full max-w-xl object-contain md:h-full md:max-h-[680px] md:object-cover"
+                  />
                 </div>
-              ))}
-            </div>
+                <div className="p-5 sm:p-7">
+                  <p className="text-sm font-bold uppercase text-primary">Student event</p>
+                  <h3 className="mt-2 text-2xl font-black">Sport Massage by AHS Nuadnaja</h3>
+                  <p className="mt-2 text-muted-foreground">Take a relaxing massage break with the AHS Nuadnaja student team.</p>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl bg-muted p-4">
+                      <p className="flex items-center gap-2 text-xs font-bold uppercase text-muted-foreground"><CalendarCheck className="size-4" /> When</p>
+                      <p className="mt-2 font-bold">28 Oct &amp; 4 Nov, 2026</p>
+                      <p className="mt-1 text-sm text-muted-foreground">09:00–09:45 · 10:00–10:45 · 11:00–11:45</p>
+                    </div>
+                    <div className="rounded-2xl bg-muted p-4">
+                      <p className="flex items-center gap-2 text-xs font-bold uppercase text-muted-foreground"><MapPin className="size-4" /> Where</p>
+                      <p className="mt-2 font-bold">Room MS112, Main Stadium Building, Thammasat University</p>
+                    </div>
+                    <div className="rounded-2xl bg-muted p-4">
+                      <p className="flex items-center gap-2 text-xs font-bold uppercase text-muted-foreground"><UserRound className="size-4" /> Who can join</p>
+                      <p className="mt-2 font-bold">University students and staff</p>
+                    </div>
+                    <div className="rounded-2xl bg-muted p-4">
+                      <p className="flex items-center gap-2 text-xs font-bold uppercase text-muted-foreground"><HeartPulse className="size-4" /> What</p>
+                      <p className="mt-2 font-bold">Relaxing massage for the arms, legs, neck, shoulders, and back.</p>
+                    </div>
+                  </div>
+                  <Button asChild variant="hero" className="mt-5 w-full bg-warning text-warning-foreground hover:bg-warning/90 sm:w-auto">
+                    <a
+                      href="https://docs.google.com/forms/d/e/1FAIpQLSfng49J5x2Dj4u-1eDPEpWgI0IeZwMKTmFUxypjD_Eg75BAyQ/viewform"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Register for a session <ArrowRight className="size-4" />
+                    </a>
+                  </Button>
+                </div>
+              </div>
+            </article>
           </CardContent>
         </Card>
       </section>
@@ -956,9 +1173,6 @@ function UniStretchApp() {
             <p className="text-sm font-bold uppercase text-primary">Guided stretch clips</p>
             <h2 className="mt-2 text-3xl font-black">Quick relief videos</h2>
           </div>
-          <Badge variant="outline" className="hidden rounded-full px-3 py-1 sm:inline-flex">
-            <Video className="mr-1 size-3" /> YouTube library
-          </Badge>
         </div>
         {exercise && activeExercise ? (
           <Card id="exercise" className="mb-6 scroll-mt-24 rounded-3xl border-primary/40 bg-primary/5 shadow-[var(--shadow-card)]">
@@ -994,18 +1208,34 @@ function UniStretchApp() {
                       ? "Finish — earn +10 pts"
                       : `Finish in ${formatDuration(exerciseRemainingSeconds)}`}
                 </Button>
-                <Button variant="ghost" onClick={() => setExercise(null)}>
+                <Button variant="ghost" onClick={() => setExercise(null)} disabled={completeStretchMutation.isPending}>
                   Cancel exercise
                 </Button>
               </div>
+              {activeExercise.guideIndex !== null ? (
+                <div id="stretch-guide" className="scroll-mt-24 border-t border-border pt-5 lg:col-span-2">
+                  <StretchStepGuide key={activeExercise.guideIndex} initialIndex={activeExercise.guideIndex} showSelector={false} compact />
+                </div>
+              ) : null}
             </CardContent>
           </Card>
         ) : null}
-        <div id="stretch-guide" className="scroll-mt-20">
-          <StretchStepGuide key={exercise?.videoIndex ?? "browse"} initialIndex={exercise?.videoIndex ?? 0} />
+        <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filter stretch clips by body area">
+          {videoFilters.map((tag) => (
+            <Button
+              key={tag}
+              type="button"
+              size="sm"
+              variant={videoFilter === tag ? "wellness" : "outline"}
+              aria-pressed={videoFilter === tag}
+              onClick={() => setVideoFilter(tag)}
+            >
+              {tag}
+            </Button>
+          ))}
         </div>
         <div id="stretch-videos" className="grid scroll-mt-20 gap-4 md:grid-cols-3">
-          {stretchVideos.map((video, index) => (
+          {filteredStretchVideos.map(({ video, index }) => (
             <Card key={video.title} className="overflow-hidden rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
               <div className="aspect-video overflow-hidden bg-muted">
                 <iframe
@@ -1148,78 +1378,75 @@ function UniStretchApp() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <p id="appointment-date-label" className="text-sm font-bold">1. Choose a date</p>
-                {bookableDays.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Loading dates…</p>
-                ) : (
-                  <div role="group" aria-labelledby="appointment-date-label" className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                    {bookableDays.map((day) => (
-                      <button
-                        key={day.key}
-                        type="button"
-                        aria-pressed={day.key === activeDay}
-                        onClick={() => {
-                          setAppointmentDay(day.key);
-                          setAppointmentSlot(null);
-                        }}
-                        className={cn(
-                          "shrink-0 rounded-2xl border px-4 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                          day.key === activeDay ? "border-primary bg-primary text-primary-foreground" : "border-border bg-surface-soft hover:bg-muted",
-                        )}
-                      >
-                        {day.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <p id="appointment-time-label" className="text-sm font-bold">2. Choose a time</p>
-                <div role="group" aria-labelledby="appointment-time-label" className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-                  {slotOptions.map((slot) => {
-                    const unavailable = slot.isPast || slot.isTaken;
-                    const selected = slot.time === appointmentSlot && !unavailable;
-                    return (
-                      <button
-                        key={slot.time}
-                        type="button"
-                        disabled={unavailable}
-                        aria-pressed={selected}
-                        onClick={() => setAppointmentSlot(slot.time)}
-                        className={cn(
-                          "rounded-2xl border px-3 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                          selected
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : unavailable
-                              ? "cursor-not-allowed border-border bg-muted opacity-50"
-                              : "border-border bg-surface-soft hover:bg-muted",
-                        )}
-                      >
-                        {slot.time}
-                        {slot.isTaken ? <span className="block text-[10px] font-semibold">Booked</span> : null}
-                      </button>
-                    );
-                  })}
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p id="appointment-date-label" className="text-sm font-bold">1. Choose a date</p>
+                  {bookableDays.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">Loading dates…</p>
+                  ) : (
+                    <Popover open={isAppointmentCalendarOpen} onOpenChange={setIsAppointmentCalendarOpen}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="soft"
+                          aria-labelledby="appointment-date-label"
+                          className="w-full justify-between rounded-2xl"
+                        >
+                          {bookableDays.find((day) => day.key === activeDay)?.label ?? "Choose a date"}
+                          <CalendarCheck className="size-4" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-auto rounded-2xl p-2">
+                        <Calendar
+                          mode="single"
+                          selected={parseCalendarDay(activeDay)}
+                          defaultMonth={parseCalendarDay(activeDay) ?? new Date()}
+                          onSelect={(date) => {
+                            if (!date) return;
+                            setAppointmentDay(formatCalendarDay(date));
+                            setAppointmentSlot(null);
+                            setIsAppointmentCalendarOpen(false);
+                          }}
+                          disabled={(date) => !bookableDays.some((day) => day.key === formatCalendarDay(date))}
+                          autoFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  )}
                 </div>
-                {slotOptions.length > 0 && slotOptions.every((slot) => slot.isPast || slot.isTaken) ? (
-                  <p className="text-sm text-muted-foreground">No times left on this day. Please pick another date.</p>
-                ) : null}
+
+                <div className="space-y-2">
+                  <p id="appointment-time-label" className="text-sm font-bold">2. Choose a time</p>
+                  <Select value={appointmentSlot ?? ""} onValueChange={setAppointmentSlot}>
+                    <SelectTrigger aria-labelledby="appointment-time-label" className="w-full rounded-2xl">
+                      <SelectValue placeholder="Choose an available time" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {slotOptions.map((slot) => (
+                        <SelectItem key={slot.time} value={slot.time} disabled={slot.isPast || slot.isTaken}>
+                          {slot.time}{slot.isTaken ? " · Booked" : slot.isPast ? " · Passed" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {slotOptions.length > 0 && slotOptions.every((slot) => slot.isPast || slot.isTaken) ? (
+                    <p className="text-sm text-muted-foreground">No times left on this day. Please pick another date.</p>
+                  ) : null}
+                </div>
               </div>
 
-              <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-border bg-surface-soft p-4">
+              <label className="flex cursor-pointer items-start gap-2 rounded-xl px-1 py-2 text-muted-foreground transition hover:text-foreground">
                 <input
                   type="checkbox"
                   checked={useStudentInsurance}
                   onChange={(event) => setUseStudentInsurance(event.target.checked)}
-                  className="mt-0.5 size-5 shrink-0 accent-primary"
+                  className="mt-0.5 size-4 shrink-0 accent-primary"
                 />
                 <span>
-                  <span className="flex items-center gap-2 font-bold">
-                    <ShieldCheck className="size-4 text-primary" /> Use my student insurance
+                  <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                    <ShieldCheck className="size-3.5 text-muted-foreground" /> Use student insurance
                   </span>
-                  <span className="mt-1 block text-sm text-muted-foreground">
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
                     See a doctor at {HOSPITAL_NAME} with your university student insurance.
                   </span>
                 </span>
@@ -1264,42 +1491,150 @@ function UniStretchApp() {
       </section>
 
       <section id="profile" className={cn("mx-auto min-h-[calc(100vh-6rem)] max-w-7xl scroll-mt-20 px-4 py-6 sm:px-6 md:py-8 lg:px-8", activeTab !== "profile" && "hidden")}>
-        <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+        <div className="grid gap-6 lg:grid-cols-2">
         <Card id="profile-settings" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
           <CardHeader>
-            <CardTitle className="text-2xl">Profile settings</CardTitle>
+            <CardTitle className="text-2xl">{isThai ? "การตั้งค่าบัญชี" : "Account settings"}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="rounded-3xl bg-muted p-5">
-              <p className="text-sm font-semibold text-muted-foreground">Signed in as</p>
-              <p className="mt-2 text-xl font-black">{user ? profile?.display_name ?? user.email : "Guest prototype"}</p>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Login to save reminder interval, streak points, bookings, and reviews to the database.
-              </p>
+              <p className="text-sm font-semibold text-muted-foreground">{isThai ? "บัญชีที่ใช้อยู่" : "Signed in as"}</p>
+              <p className="mt-2 text-xl font-black">{user ? profile?.display_name ?? user.user_metadata?.full_name ?? user.user_metadata?.name ?? user.email : isThai ? "ผู้ใช้ทั่วไป" : "Guest"}</p>
+              {user?.email && !user.email.endsWith("@app.local") ? <p className="mt-1 text-sm text-muted-foreground">{user.email}</p> : null}
             </div>
+
+            {user ? (
+              <>
+                <form className="space-y-3" onSubmit={handleSaveDisplayName}>
+                  <div className="space-y-2">
+                    <Label htmlFor="profile-display-name">{isThai ? "ชื่อที่แสดง" : "Display name"}</Label>
+                    <Input id="profile-display-name" value={displayNameDraft} maxLength={80} onChange={(event) => setDisplayNameDraft(event.target.value)} className="rounded-2xl" />
+                  </div>
+                  <Button type="submit" variant="outline" size="sm" className="rounded-xl" disabled={isAccountSaving}>{isThai ? "บันทึกชื่อ" : "Save name"}</Button>
+                </form>
+
+                <details className="rounded-2xl border border-border p-4">
+                  <summary className="cursor-pointer text-sm font-bold">{isThai ? "เปลี่ยนรหัสผ่าน" : "Change password"}</summary>
+                  <form className="mt-4 space-y-3" onSubmit={handleChangePassword}>
+                    <div className="space-y-2">
+                      <Label htmlFor="new-password">{isThai ? "รหัสผ่านใหม่" : "New password"}</Label>
+                      <Input id="new-password" type="password" autoComplete="new-password" minLength={8} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="rounded-2xl" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="confirm-new-password">{isThai ? "ยืนยันรหัสผ่านใหม่" : "Confirm new password"}</Label>
+                      <Input id="confirm-new-password" type="password" autoComplete="new-password" minLength={8} value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} className="rounded-2xl" />
+                    </div>
+                    <Button type="submit" variant="soft" disabled={isAccountSaving}>{isThai ? "อัปเดตรหัสผ่าน" : "Update password"}</Button>
+                  </form>
+                </details>
+                <Button type="button" variant="ghost" className="text-destructive hover:text-destructive" onClick={handleSignOut}>
+                  <LogOut className="size-4" /> {isThai ? "ออกจากระบบ" : "Sign out"}
+                </Button>
+              </>
+            ) : (
+              <Button type="button" variant="soft" onClick={() => setIsAuthDialogOpen(true)}>{isThai ? "เข้าสู่ระบบ" : "Log in"}</Button>
+            )}
+            {accountError ? <p role="alert" className="rounded-2xl bg-destructive/10 p-3 text-sm font-semibold text-destructive">{accountError}</p> : null}
+            {accountMessage ? <p role="status" className="rounded-2xl bg-success/10 p-3 text-sm font-semibold text-success">{accountMessage}</p> : null}
+          </CardContent>
+        </Card>
+
+        <Card id="app-preferences" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+          <CardHeader>
+            <CardTitle className="text-2xl">{isThai ? "การตั้งค่าแอป" : "App preferences"}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
             <div className="space-y-2">
-              <Label>Reminder interval</Label>
+              <Label>{isThai ? "ช่วงเวลาแจ้งเตือน" : "Reminder interval"}</Label>
               <Select
                 value={String(reminderMinutes)}
-                onValueChange={(value) => (user ? updateReminderMutation.mutate(Number(value)) : setIsAuthDialogOpen(true))}
+                onValueChange={(value) => {
+                  const minutes = Number(value);
+                  if (user) updateReminderMutation.mutate(minutes);
+                  else setGuestReminderMinutes(minutes);
+                }}
               >
-                <SelectTrigger className="rounded-2xl">
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger className="rounded-2xl"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {REMINDER_OPTIONS.map((minutes) => (
-                    <SelectItem key={minutes} value={String(minutes)}>{minutes} minutes</SelectItem>
+                    <SelectItem key={minutes} value={String(minutes)}>{minutes} {isThai ? "นาที" : "minutes"}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label htmlFor="reminder-sound-toggle" className="cursor-pointer">{isThai ? "เสียงแจ้งเตือน" : "Reminder sound"}</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">{isThai ? "เล่นเสียงเมื่อถึงเวลาให้ยืดเหยียด" : "Play a sound when it is time to stretch."}</p>
+                </div>
+                <Switch id="reminder-sound-toggle" checked={soundEnabled} onCheckedChange={setSoundEnabled} aria-label={isThai ? "เปิดเสียงแจ้งเตือน" : "Enable reminder sound"} />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <Select value={reminderSound} onValueChange={(value) => setReminderSound(value as ReminderSound)} disabled={!soundEnabled}>
+                  <SelectTrigger className="rounded-2xl"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="aggressive">Aggressive</SelectItem>
+                    <SelectItem value="chime">{isThai ? "เสียงใส" : "Gentle chime"}</SelectItem>
+                    <SelectItem value="kims-buzzer">Kim's buzzer</SelectItem>
+                    <SelectItem value="bell">{isThai ? "เสียงระฆังนุ่มนวล" : "Soft bell"}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button type="button" variant="outline" className="rounded-2xl" disabled={!soundEnabled} onClick={() => playReminderSound(reminderSound)}>{isThai ? "ลองเสียง" : "Test sound"}</Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>{isThai ? "ภาษา" : "Language"}</Label>
+              <Select value={language} onValueChange={(value) => setLanguage(value as AppLanguage)}>
+                <SelectTrigger className="rounded-2xl"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="en">English</SelectItem>
+                  <SelectItem value="th">ไทย</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+              <div>
+                <p className="text-sm font-semibold">{isThai ? "แนะนำการใช้งาน" : "App tutorial"}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{isThai ? "เปิดดูคำแนะนำแต่ละหน้าจออีกครั้ง" : "Review the quick guide to each screen."}</p>
+              </div>
+              <Button type="button" variant="soft" onClick={() => setTourReplayToken((token) => token + 1)}>
+                <Sparkles className="size-4" /> {isThai ? "ดู Tutorial อีกครั้ง" : "Show tutorial again"}
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
-        <Card id="review" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)]">
+        <Card id="profile-help" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)] lg:col-span-2">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-2xl">
-              <Star className="size-6 text-warning" /> Review UniStretch
+              <MessageCircle className="size-5 text-primary" /> {isThai ? "ช่วยเหลือ" : "Help"}
+            </CardTitle>
+            <p className="text-sm text-muted-foreground">{isThai ? "คำตอบสำหรับการใช้งาน UniStretch" : "Quick answers about using UniStretch."}</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <details className="rounded-2xl border border-border bg-surface-soft p-4">
+              <summary className="cursor-pointer font-semibold">{isThai ? "ตั้งเวลาและเสียงเตือนได้ที่ไหน?" : "Where can I change my reminder and sound settings?"}</summary>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">{isThai ? "ไปที่ Profile > App preferences เพื่อเลือกช่วงเวลา เปิดหรือปิดเสียง และทดลองเสียงแจ้งเตือน" : "Open Profile > App preferences to change the interval, turn reminder sound on or off, and preview the sound."}</p>
+            </details>
+            <details className="rounded-2xl border border-border bg-surface-soft p-4">
+              <summary className="cursor-pointer font-semibold">{isThai ? "ทำอย่างไรจึงจะได้รับแต้ม?" : "How do I earn stretch points?"}</summary>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">{isThai ? "เลือก Do this exercise แล้วทำตามคลิปจนตัวจับเวลาหมด จากนั้นกด Finish เพื่อบันทึก 10 แต้ม ต้องเข้าสู่ระบบเพื่อบันทึกแต้มในบัญชี" : "Choose Do this exercise, follow the clip until its timer ends, then press Finish to save 10 points. Sign in to save points to your account."}</p>
+            </details>
+            <details className="rounded-2xl border border-border bg-surface-soft p-4">
+              <summary className="cursor-pointer font-semibold">{isThai ? "เลือกวันนัดหมายไม่ได้ ทำอย่างไร?" : "Why can’t I choose a particular appointment date or time?"}</summary>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">{isThai ? "ปฏิทินแสดงเฉพาะวันที่เปิดให้จอง และเวลาที่ผ่านไปหรือมีผู้จองแล้วจะเลือกไม่ได้ ลองเลือกวันอื่น" : "The calendar only shows bookable dates. Past or already-booked time slots are disabled; try another date or time."}</p>
+            </details>
+          </CardContent>
+        </Card>
+
+        <Card id="review" className="scroll-mt-20 rounded-3xl border-border bg-card shadow-[var(--shadow-card)] lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-2xl">
+              <Star className="size-6 text-warning" /> {isThai ? "รีวิว UniStretch" : "Review UniStretch"}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
@@ -1318,20 +1653,20 @@ function UniStretchApp() {
               ))}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="review-feedback">Suggestions</Label>
+              <Label htmlFor="review-feedback">{isThai ? "ข้อเสนอแนะ" : "Suggestions"}</Label>
               <Textarea
                 id="review-feedback"
                 value={reviewFeedback}
                 maxLength={600}
                 onChange={(event) => setReviewFeedback(event.target.value)}
-                placeholder="Tell us what would make stretch reminders easier to follow"
+                placeholder={isThai ? "บอกเราได้ว่าอยากให้การเตือนยืดเหยียดดีขึ้นอย่างไร" : "Tell us what would make stretch reminders easier to follow"}
                 className="min-h-28 rounded-2xl"
               />
             </div>
             {reviewError ? <p className="rounded-2xl bg-destructive/10 p-3 text-sm font-semibold text-destructive">{reviewError}</p> : null}
             {reviewMessage ? <p className="rounded-2xl bg-success/10 p-3 text-sm font-semibold text-success">{reviewMessage}</p> : null}
             <Button variant="hero" onClick={handleReview} disabled={reviewMutation.isPending}>
-              Submit review
+              {isThai ? "ส่งรีวิว" : "Submit review"}
             </Button>
             <ReviewList reviews={reviewsQuery.data ?? []} />
           </CardContent>
@@ -1341,10 +1676,10 @@ function UniStretchApp() {
 
       <nav aria-label="App navigation" className="fixed inset-x-3 bottom-3 z-40 mx-auto grid max-w-2xl grid-cols-4 rounded-3xl border border-surface/80 bg-surface/90 p-1.5 shadow-[var(--shadow-mobile-nav)] backdrop-blur-xl sm:bottom-5 sm:p-2">
         {([
-          { id: "home", label: "Home", icon: House },
-          { id: "stretch", label: "Stretch", icon: Activity },
-          { id: "booking", label: "Doctors", icon: Stethoscope },
-          { id: "profile", label: "Profile", icon: UserRound },
+          { id: "home", label: isThai ? "หน้าหลัก" : "Home", icon: House },
+          { id: "stretch", label: isThai ? "ยืดเหยียด" : "Stretch", icon: Activity },
+          { id: "booking", label: isThai ? "แพทย์" : "Doctors", icon: Stethoscope },
+          { id: "profile", label: isThai ? "โปรไฟล์" : "Profile", icon: UserRound },
         ] satisfies { id: AppTab; label: string; icon: typeof House }[]).map(({ id, label, icon: Icon }) => (
           <Button
             key={id}
@@ -1374,13 +1709,34 @@ function UniStretchApp() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isRewardCatalogOpen} onOpenChange={setIsRewardCatalogOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto rounded-3xl border-border bg-card">
+          <DialogHeader>
+            <DialogTitle>Reward ideas</DialogTitle>
+            <DialogDescription>These are previews for a future rewards program. Browsing does not use your points.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {rewardPreviews.map((reward) => {
+              const Icon = reward.icon;
+              return (
+                <button key={reward.id} type="button" onClick={() => { setIsRewardCatalogOpen(false); setSelectedReward(reward); }} className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-2xl border border-border bg-surface-soft p-3 text-left transition hover:border-primary/50 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <span className="flex size-10 items-center justify-center rounded-xl bg-event/20 text-event-foreground"><Icon className="size-5" /></span>
+                  <span className="min-w-0"><span className="block text-sm font-bold">{reward.title}</span><span className="mt-1 block text-xs text-muted-foreground">{reward.points} points · Preview only</span></span>
+                  <ArrowRight className="size-4 text-muted-foreground" />
+                </button>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isReminderDialogOpen} onOpenChange={setIsReminderDialogOpen}>
-        <DialogContent className="rounded-3xl border-border bg-card">
+        <DialogContent className="rounded-3xl border-2 border-warning bg-warning text-warning-foreground shadow-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <TimerReset className="size-5 text-warning" /> Time to stand and stretch
+              <TimerReset className="size-5 text-warning-foreground" /> Time to stand and stretch
             </DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-warning-foreground">
               You have been sitting for {sittingMinutes} minutes. Take a short stretch break to earn 10 points and keep your streak going.
             </DialogDescription>
           </DialogHeader>
@@ -1448,7 +1804,13 @@ function UniStretchApp() {
         </DialogContent>
       </Dialog>
 
-      <FirstLoginTour userId={user?.id} onNavigate={openTab} />
+      <FirstLoginTour
+        userId={user?.id}
+        onNavigate={openTab}
+        forceOpen={tourReplayToken > 0}
+        replayToken={tourReplayToken}
+        onClose={() => setTourReplayToken(0)}
+      />
     </main>
   );
 }
@@ -1461,38 +1823,77 @@ async function ensureProfile(userId: string, fallbackName: string, username?: st
   if (error) throw error;
 }
 
+function playReminderSound(sound: ReminderSound) {
+  if (sound === "aggressive" || sound === "kims-buzzer") {
+    if (typeof window === "undefined") return;
+    try {
+      const audio = new Audio(sound === "aggressive" ? "/aggressive-notification.m4a" : "/kims-buzzer-notification.m4a");
+      audio.volume = 0.85;
+      void audio.play().catch(() => undefined);
+    } catch {
+      // Audio may be unavailable or blocked; reminders still appear visually.
+    }
+    return;
+  }
+  if (typeof window === "undefined" || typeof window.AudioContext === "undefined") return;
+  try {
+    const context = new window.AudioContext();
+    const notes = sound === "chime" ? [660, 880, 1046.5] : [784, 587.3];
+    const start = context.currentTime;
+    notes.forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const noteStart = start + index * (sound === "chime" ? 0.16 : 0.22);
+      oscillator.type = sound === "chime" ? "sine" : "triangle";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, noteStart);
+      gain.gain.exponentialRampToValueAtTime(0.12, noteStart + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.42);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteStart + 0.44);
+    });
+    window.setTimeout(() => void context.close(), 1200);
+  } catch {
+    // Audio may be unavailable or blocked by the browser; reminders still appear visually.
+  }
+}
+
 function BookingList({ bookings }: { bookings: Booking[] }) {
+  const [filter, setFilter] = useState<"upcoming" | "past">("upcoming");
   if (bookings.length === 0) {
     return <p className="text-sm text-muted-foreground">No appointments yet. Choose a doctor, date and time above to book one.</p>;
   }
 
   const nowMs = Date.now();
   const startsAt = (booking: Booking) => new Date(booking.appointment_time).getTime();
-  const isUpcoming = (booking: Booking) => booking.status === "booked" && startsAt(booking) > nowMs;
+  const isUpcoming = (booking: Booking) => isActiveBookingStatus(booking.status) && startsAt(booking) > nowMs;
   const upcoming = bookings.filter(isUpcoming).sort((a, b) => startsAt(a) - startsAt(b));
   const past = bookings
     .filter((booking) => !isUpcoming(booking))
-    .sort((a, b) => startsAt(b) - startsAt(a))
-    .slice(0, 5);
+    .sort((a, b) => startsAt(b) - startsAt(a));
+  const filteredBookings = filter === "upcoming" ? upcoming : past;
 
   return (
     <div className="space-y-5">
-      <div className="space-y-2">
-        <h3 className="text-sm font-bold">Upcoming</h3>
-        {upcoming.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No upcoming appointments.</p>
-        ) : (
-          upcoming.map((booking) => <BookingRow key={booking.id} booking={booking} />)
-        )}
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter appointments">
+        <Button size="sm" variant={filter === "upcoming" ? "wellness" : "outline"} aria-pressed={filter === "upcoming"} onClick={() => setFilter("upcoming")}>
+          Upcoming <span className="ml-1 opacity-75">{upcoming.length}</span>
+        </Button>
+        <Button size="sm" variant={filter === "past" ? "wellness" : "outline"} aria-pressed={filter === "past"} onClick={() => setFilter("past")}>
+          Past <span className="ml-1 opacity-75">{past.length}</span>
+        </Button>
       </div>
-      {past.length > 0 ? (
+      {filteredBookings.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No {filter} appointments.</p>
+      ) : (
         <div className="space-y-2">
-          <h3 className="text-sm font-bold text-muted-foreground">Past</h3>
-          {past.map((booking) => (
-            <BookingRow key={booking.id} booking={booking} muted />
+          {filteredBookings.map((booking) => (
+            <BookingRow key={booking.id} booking={booking} muted={filter === "past"} />
           ))}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
